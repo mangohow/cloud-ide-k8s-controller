@@ -1,0 +1,12 @@
+domain: my.domain
+layout:
+- go.kubebuilder.io/v3
+projectName: cloud-ide-k8s-controller
+repo: github.com/mangohow/cloud-ide-k8s-controller
+resources:
+- controller: true
+  domain: my.domain
+  group: cloud-ide
+  kind: Pod
+  version: v1
+version: "3"
