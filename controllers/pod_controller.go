@@ -64,6 +64,8 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			logger.Error(err, "get pod")
 			return ctrl.Result{Requeue: true}, err
 		}
+
+		return ctrl.Result{}, nil
 	}
 	fmt.Printf("name:%s, status:%s\n", pod.Name, pod.Status.Phase)
 	// 通知对端Pod已经处于Running状态

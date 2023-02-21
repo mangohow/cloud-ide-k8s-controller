@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc1
+  namespace: cloud-ide
+spec:
+  accessModes: # 访客模式
+    - ReadWriteMany
+  resources: # 请求空间
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc2
+  namespace: cloud-ide
+spec:
+  accessModes: # 访客模式
+    - ReadWriteMany
+  resources: # 请求空间
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc3
+  namespace: cloud-ide
+spec:
+  accessModes: # 访客模式
+    - ReadWriteMany
+  resources: # 请求空间
+    requests:
+      storage: 10Gi

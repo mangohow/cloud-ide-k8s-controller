@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: code-server-volum
+  namespace: cloud-ide
+  labels:
+    kind: code-server
+spec:
+  containers:
+  - name: code-server
+    image: mangohow/code-server-go1.19:v1.0
+    volumeMounts:
+    - name: volume
+      mountPath: /user_data/
+  volumes:
+  - name: volume
+    persistentVolumeClaim:
+      claimName: pvc3
+      readOnly: false

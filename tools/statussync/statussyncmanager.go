@@ -9,7 +9,7 @@ var (
 	ErrNotFound = errors.New("not Found")
 )
 
-// StatusInformer 状态同步通知器，当Pod状态处于Running时，同时对端
+// StatusInformer 状态同步通知器，当Pod状态处于Running时，通知对端
 type StatusInformer struct {
 	sync.Mutex
 	m map[string]chan struct{}

@@ -19,12 +19,13 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/go-logr/logr"
+	"github.com/mangohow/cloud-ide-k8s-controller/middleware"
 	"github.com/mangohow/cloud-ide-k8s-controller/pb"
 	"github.com/mangohow/cloud-ide-k8s-controller/service"
 	"github.com/mangohow/cloud-ide-k8s-controller/tools/signal"
 	"github.com/mangohow/cloud-ide-k8s-controller/tools/statussync"
 	"google.golang.org/grpc"
+	"k8s.io/klog/v2"
 	"net"
 	"os"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -66,11 +67,15 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
+	flag.StringVar(&service.Mode, "mode", service.ModeRelease, "The program running mode(debug or release)")
+
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	fmt.Printf("Running mode:%s\n", service.Mode)
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -116,7 +121,7 @@ func main() {
 	}
 
 	// 启动grpc服务
-	grpcServer := StartGrpcServer(mgr.GetClient(), &ctrl.Log, manager)
+	grpcServer := StartGrpcServer(mgr.GetClient(), manager)
 	// 安装信号处理
 	ctx := signal.SetupSignal(func() {
 		ctrl.Log.Info("receive signal, is going to shutdown")
@@ -131,18 +136,21 @@ func main() {
 	}
 }
 
-func StartGrpcServer(client client.Client, logger *logr.Logger, manager *statussync.StatusInformer) *grpc.Server {
+func StartGrpcServer(client client.Client, manager *statussync.StatusInformer) *grpc.Server {
 	listener, err := net.Listen("tcp", ":6387")
 	if err != nil {
 		panic(fmt.Errorf("create grpc service: %v", err))
 	}
-	server := grpc.NewServer()
-	pb.RegisterCloudIdeServiceServer(server, service.NewCloudSpaceService(client, logger, manager))
+	server := grpc.NewServer(grpc.ChainUnaryInterceptor(
+		middleware.RecoveryInterceptorMiddleware(),
+		middleware.LogInterceptorMiddleware(),
+	))
+	pb.RegisterCloudIdeServiceServer(server, service.NewCloudSpaceService(client, manager))
 
 	go func() {
 		err := server.Serve(listener)
 		if err != nil && err == grpc.ErrServerStopped {
-			fmt.Printf("server stopped")
+			klog.Info("server stopped")
 		} else if err != nil {
 			panic(fmt.Errorf("start grpc server: %v", err))
 		}
