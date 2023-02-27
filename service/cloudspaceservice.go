@@ -5,6 +5,7 @@ import (
 	"github.com/mangohow/cloud-ide-k8s-controller/pb"
 	"github.com/mangohow/cloud-ide-k8s-controller/tools/statussync"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
@@ -65,37 +66,71 @@ func (s *CloudSpaceService) CreateSpace(ctx context.Context, info *pb.PodInfo) (
 	defer cancel()
 	err = s.client.Create(deadline, pvc)
 	if err != nil {
-		klog.Errorf("create pvc error:%v", err)
-		return nil, ErrCreatePVC
+		// 如果PVC已经存在
+		if errors.IsAlreadyExists(err) {
+			klog.Infof("create pvc while pvc is already exist, pvc:%s", pvcName)
+		} else {
+			klog.Errorf("create pvc error:%v", err)
+			return nil, ErrCreatePVC
+		}
 	}
 	klog.Info("[CreateSpace] 2.create pvc success")
 
 	// 2.创建Pod
-	return s.createPod(info)
+	return s.createPod(ctx, info)
 }
 
-func (s *CloudSpaceService) createPod(info *pb.PodInfo) (*pb.PodSpaceInfo, error) {
+func (s *CloudSpaceService) createPod(c context.Context, info *pb.PodInfo) (*pb.PodSpaceInfo, error) {
 	pod := podTpl.DeepCopy()
 	s.fillPod(info, pod, info.Name)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
 	defer cancel()
 	err := s.client.Create(ctx, pod)
 	if err != nil {
-		klog.Errorf("create pod err:%v", err)
-		return nil, ErrCreatePod
+		// 如果该Pod已经存在
+		if errors.IsAlreadyExists(err) {
+			klog.Infof("create pod while pod is already exist, pod:%s", info.Name)
+			// 判断Pod是否处于running状态
+			existPod := v1.Pod{}
+			err = s.client.Get(context.Background(), client.ObjectKeyFromObject(pod), &existPod)
+			if err != nil {
+				return nil, ErrCreatePod
+			}
+			if existPod.Status.Phase == v1.PodRunning {
+				return &pb.PodSpaceInfo{
+					NodeName: existPod.Spec.NodeName,
+					Ip:       existPod.Status.PodIP,
+					Port:     existPod.Spec.Containers[0].Ports[0].ContainerPort,
+				}, nil
+			} else {
+				s.deletePod(&existPod)
+				return nil, ErrCreatePod
+			}
+
+		} else {
+			klog.Errorf("create pod err:%v", err)
+			return nil, ErrCreatePod
+		}
 	}
+
 	klog.Info("[createPod] create pod success")
 	// 向informer中添加chan，当Pod准备就绪时就会收到通知
 	ch := s.statusInformer.Add(pod.Name)
 	// 从informer中删除
 	defer s.statusInformer.Delete(pod.Name)
-	// 等待pod状态处于Running
-	<-ch
 
-	return s.GetPodSpaceInfo(context.Background(), &pb.QueryOption{
-		Name:      info.Name,
-		Namespace: info.Namespace,
-	})
+	select {
+	// 等待pod状态处于Running
+	case <-ch:
+		// Pod已经处于running状态
+		return s.GetPodSpaceInfo(context.Background(), &pb.QueryOption{Name: info.Name, Namespace: info.Namespace})
+	case <-c.Done():
+		// 超时,Pod启动失败,可能是由于资源不足,将Pod删除
+		klog.Error("pod start failed, maybe resources is not enough")
+		s.deletePod(pod)
+		return nil, ErrCreatePod
+	}
+
 }
 
 /*
@@ -217,7 +252,7 @@ func (s *CloudSpaceService) fillPod(info *pb.PodInfo, pod *v1.Pod, pvc string) {
 
 // StartSpace 启动(创建)云IDE空间,非第一次创建,无需挂载存储卷,使用之前的存储卷
 func (s *CloudSpaceService) StartSpace(ctx context.Context, info *pb.PodInfo) (*pb.PodSpaceInfo, error) {
-	return s.createPod(info)
+	return s.createPod(ctx, info)
 }
 
 // DeleteSpace 删除云IDE空间, 只需要删除存储卷
@@ -233,6 +268,11 @@ func (s *CloudSpaceService) DeleteSpace(ctx context.Context, option *pb.QueryOpt
 	defer cancelFunc()
 	err := s.client.Delete(c, pvc)
 	if err != nil {
+		// 如果是PVC不存在引起的错误就认为是成功了,因为就是要删除PVC
+		if errors.IsNotFound(err) {
+			klog.Infof("pvc not found,err:%v", err)
+			return ResponseSuccess, nil
+		}
 		klog.Errorf("delete pvc error:%v", err)
 		return ResponseFailed, ErrDeletePVC
 	}
@@ -241,18 +281,17 @@ func (s *CloudSpaceService) DeleteSpace(ctx context.Context, option *pb.QueryOpt
 	return ResponseSuccess, nil
 }
 
-func (s *CloudSpaceService) deletePod(option *pb.QueryOption) (*pb.Response, error) {
-	pod := v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      option.Name,
-			Namespace: option.Namespace,
-		},
-	}
+func (s *CloudSpaceService) deletePod(pod *v1.Pod) (*pb.Response, error) {
 	// k8s的默认最大宽限时间为30s,因此在这设置为32s
 	ctx, cancelFunc := context.WithTimeout(context.Background(), time.Second*32)
 	defer cancelFunc()
-	err := s.client.Delete(ctx, &pod)
+	err := s.client.Delete(ctx, pod)
 	if err != nil {
+		if errors.IsNotFound(err) {
+			klog.Infof("delete pod while pod not exist, pod:%s", pod.Name)
+			return ResponseSuccess, nil
+		}
+
 		klog.Errorf("delete pod error:%v", err)
 		return ResponseFailed, ErrDeletePod
 	}
@@ -263,13 +302,20 @@ func (s *CloudSpaceService) deletePod(option *pb.QueryOption) (*pb.Response, err
 
 // StopSpace 停止(删除)云工作空间,无需删除存储卷
 func (s *CloudSpaceService) StopSpace(ctx context.Context, option *pb.QueryOption) (*pb.Response, error) {
-	return s.deletePod(option)
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      option.Name,
+			Namespace: option.Namespace,
+		},
+	}
+
+	return s.deletePod(pod)
 }
 
 // GetPodSpaceStatus 获取Pod运行状态
 func (s *CloudSpaceService) GetPodSpaceStatus(ctx context.Context, option *pb.QueryOption) (*pb.PodStatus, error) {
 	pod := v1.Pod{}
-	err := s.client.Get(context.Background(), client.ObjectKey{Name: option.Name, Namespace: option.Namespace}, &pod)
+	err := s.client.Get(ctx, client.ObjectKey{Name: option.Name, Namespace: option.Namespace}, &pod)
 	if err != nil {
 		klog.Errorf("get pod space status error:%v", err)
 		return &pb.PodStatus{Status: PodNotExist, Message: "NotExist"}, err
@@ -281,7 +327,7 @@ func (s *CloudSpaceService) GetPodSpaceStatus(ctx context.Context, option *pb.Qu
 // GetPodSpaceInfo 获取云IDE空间Pod的信息
 func (s *CloudSpaceService) GetPodSpaceInfo(ctx context.Context, option *pb.QueryOption) (*pb.PodSpaceInfo, error) {
 	pod := v1.Pod{}
-	err := s.client.Get(context.Background(), client.ObjectKey{Name: option.Name, Namespace: option.Namespace}, &pod)
+	err := s.client.Get(ctx, client.ObjectKey{Name: option.Name, Namespace: option.Namespace}, &pod)
 	if err != nil {
 		klog.Errorf("get pod space info error:%v", err)
 		return &pb.PodSpaceInfo{}, err
