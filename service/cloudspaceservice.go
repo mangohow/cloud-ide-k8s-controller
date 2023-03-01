@@ -4,6 +4,8 @@ import (
 	"context"
 	"github.com/mangohow/cloud-ide-k8s-controller/pb"
 	"github.com/mangohow/cloud-ide-k8s-controller/tools/statussync"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -33,6 +35,13 @@ var (
 	ResponseFailed  = &pb.Response{Status: 400, Message: "failed"}
 )
 
+var (
+	EmptyWorkspaceRunningInfo = &pb.WorkspaceRunningInfo{}
+	EmptyResponse             = &pb.Response{}
+	EmptyWorkspaceInfo        = &pb.WorkspaceInfo{}
+	EmptyWorkspaceStatus      = &pb.WorkspaceStatus{}
+)
+
 const (
 	PodNotExist int32 = iota
 	PodExist
@@ -53,13 +62,13 @@ func NewCloudSpaceService(client client.Client, manager *statussync.StatusInform
 }
 
 // CreateSpace 创建云IDE空间并等待Pod状态变为Running,第一次创建,需要挂载存储卷
-func (s *CloudSpaceService) CreateSpace(ctx context.Context, info *pb.PodInfo) (*pb.PodSpaceInfo, error) {
+func (s *CloudSpaceService) CreateSpace(ctx context.Context, info *pb.WorkspaceInfo) (*pb.WorkspaceRunningInfo, error) {
 	// 1. 创建pvc,pvc的name和pod相同
 	pvcName := info.Name
 	pvc, err := s.constructPVC(pvcName, info.Namespace, info.ResourceLimit.Storage)
 	if err != nil {
 		klog.Errorf("construct pvc error:%v, info:%v", err, info)
-		return nil, ErrConstructPVC
+		return EmptyWorkspaceRunningInfo, status.Error(codes.Unknown, ErrConstructPVC.Error())
 	}
 	klog.Infof("[CreateSpace] 1.construct pvc")
 	deadline, cancel := context.WithTimeout(context.Background(), time.Second*30)
@@ -71,7 +80,7 @@ func (s *CloudSpaceService) CreateSpace(ctx context.Context, info *pb.PodInfo) (
 			klog.Infof("create pvc while pvc is already exist, pvc:%s", pvcName)
 		} else {
 			klog.Errorf("create pvc error:%v", err)
-			return nil, ErrCreatePVC
+			return EmptyWorkspaceRunningInfo, status.Error(codes.Unknown, ErrConstructPVC.Error())
 		}
 	}
 	klog.Info("[CreateSpace] 2.create pvc success")
@@ -80,7 +89,7 @@ func (s *CloudSpaceService) CreateSpace(ctx context.Context, info *pb.PodInfo) (
 	return s.createPod(ctx, info)
 }
 
-func (s *CloudSpaceService) createPod(c context.Context, info *pb.PodInfo) (*pb.PodSpaceInfo, error) {
+func (s *CloudSpaceService) createPod(c context.Context, info *pb.WorkspaceInfo) (*pb.WorkspaceRunningInfo, error) {
 	pod := podTpl.DeepCopy()
 	s.fillPod(info, pod, info.Name)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
@@ -94,22 +103,22 @@ func (s *CloudSpaceService) createPod(c context.Context, info *pb.PodInfo) (*pb.
 			existPod := v1.Pod{}
 			err = s.client.Get(context.Background(), client.ObjectKeyFromObject(pod), &existPod)
 			if err != nil {
-				return nil, ErrCreatePod
+				return EmptyWorkspaceRunningInfo, status.Error(codes.Unknown, ErrCreatePod.Error())
 			}
 			if existPod.Status.Phase == v1.PodRunning {
-				return &pb.PodSpaceInfo{
+				return &pb.WorkspaceRunningInfo{
 					NodeName: existPod.Spec.NodeName,
 					Ip:       existPod.Status.PodIP,
 					Port:     existPod.Spec.Containers[0].Ports[0].ContainerPort,
 				}, nil
 			} else {
 				s.deletePod(&existPod)
-				return nil, ErrCreatePod
+				return EmptyWorkspaceRunningInfo, status.Error(codes.Unknown, ErrCreatePod.Error())
 			}
 
 		} else {
 			klog.Errorf("create pod err:%v", err)
-			return nil, ErrCreatePod
+			return EmptyWorkspaceRunningInfo, status.Error(codes.Unknown, ErrCreatePod.Error())
 		}
 	}
 
@@ -128,7 +137,7 @@ func (s *CloudSpaceService) createPod(c context.Context, info *pb.PodInfo) (*pb.
 		// 超时,Pod启动失败,可能是由于资源不足,将Pod删除
 		klog.Error("pod start failed, maybe resources is not enough")
 		s.deletePod(pod)
-		return nil, ErrCreatePod
+		return EmptyWorkspaceRunningInfo, status.Error(codes.Unknown, ErrCreatePod.Error())
 	}
 
 }
@@ -197,7 +206,7 @@ spec:
       readOnly: false
 */
 
-func (s *CloudSpaceService) fillPod(info *pb.PodInfo, pod *v1.Pod, pvc string) {
+func (s *CloudSpaceService) fillPod(info *pb.WorkspaceInfo, pod *v1.Pod, pvc string) {
 	volumeName := "volume-user-workspace"
 	pod.Name = info.Name
 	pod.Namespace = info.Namespace
@@ -251,7 +260,7 @@ func (s *CloudSpaceService) fillPod(info *pb.PodInfo, pod *v1.Pod, pvc string) {
 }
 
 // StartSpace 启动(创建)云IDE空间,非第一次创建,无需挂载存储卷,使用之前的存储卷
-func (s *CloudSpaceService) StartSpace(ctx context.Context, info *pb.PodInfo) (*pb.PodSpaceInfo, error) {
+func (s *CloudSpaceService) StartSpace(ctx context.Context, info *pb.WorkspaceInfo) (*pb.WorkspaceRunningInfo, error) {
 	return s.createPod(ctx, info)
 }
 
@@ -274,7 +283,7 @@ func (s *CloudSpaceService) DeleteSpace(ctx context.Context, option *pb.QueryOpt
 			return ResponseSuccess, nil
 		}
 		klog.Errorf("delete pvc error:%v", err)
-		return ResponseFailed, ErrDeletePVC
+		return ResponseFailed, status.Error(codes.Unknown, ErrDeletePVC.Error())
 	}
 	klog.Info("[DeleteSpace] delete pvc success")
 
@@ -293,7 +302,7 @@ func (s *CloudSpaceService) deletePod(pod *v1.Pod) (*pb.Response, error) {
 		}
 
 		klog.Errorf("delete pod error:%v", err)
-		return ResponseFailed, ErrDeletePod
+		return ResponseFailed, status.Error(codes.Unknown, ErrDeletePod.Error())
 	}
 	klog.Info("[deletePod] delete pod success")
 
@@ -313,27 +322,35 @@ func (s *CloudSpaceService) StopSpace(ctx context.Context, option *pb.QueryOptio
 }
 
 // GetPodSpaceStatus 获取Pod运行状态
-func (s *CloudSpaceService) GetPodSpaceStatus(ctx context.Context, option *pb.QueryOption) (*pb.PodStatus, error) {
+func (s *CloudSpaceService) GetPodSpaceStatus(ctx context.Context, option *pb.QueryOption) (*pb.WorkspaceStatus, error) {
 	pod := v1.Pod{}
 	err := s.client.Get(ctx, client.ObjectKey{Name: option.Name, Namespace: option.Namespace}, &pod)
 	if err != nil {
+		if errors.IsNotFound(err) {
+			return EmptyWorkspaceStatus, status.Error(codes.NotFound, "pod not found")
+		}
+
 		klog.Errorf("get pod space status error:%v", err)
-		return &pb.PodStatus{Status: PodNotExist, Message: "NotExist"}, err
+		return &pb.WorkspaceStatus{Status: PodNotExist, Message: "NotExist"}, status.Error(codes.Unknown, err.Error())
 	}
 
-	return &pb.PodStatus{Status: PodExist, Message: string(pod.Status.Phase)}, nil
+	return &pb.WorkspaceStatus{Status: PodExist, Message: string(pod.Status.Phase)}, nil
 }
 
 // GetPodSpaceInfo 获取云IDE空间Pod的信息
-func (s *CloudSpaceService) GetPodSpaceInfo(ctx context.Context, option *pb.QueryOption) (*pb.PodSpaceInfo, error) {
+func (s *CloudSpaceService) GetPodSpaceInfo(ctx context.Context, option *pb.QueryOption) (*pb.WorkspaceRunningInfo, error) {
 	pod := v1.Pod{}
 	err := s.client.Get(ctx, client.ObjectKey{Name: option.Name, Namespace: option.Namespace}, &pod)
 	if err != nil {
+		if errors.IsNotFound(err) {
+			return EmptyWorkspaceRunningInfo, status.Error(codes.NotFound, "pod not found")
+		}
+
 		klog.Errorf("get pod space info error:%v", err)
-		return &pb.PodSpaceInfo{}, err
+		return EmptyWorkspaceRunningInfo, status.Error(codes.Unknown, err.Error())
 	}
 
-	return &pb.PodSpaceInfo{NodeName: pod.Spec.NodeName,
+	return &pb.WorkspaceRunningInfo{NodeName: pod.Spec.NodeName,
 		Ip:   pod.Status.PodIP,
 		Port: pod.Spec.Containers[0].Ports[0].ContainerPort}, nil
 }
